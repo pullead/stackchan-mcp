@@ -1,0 +1,30 @@
+# ── 绝对不能提交 ────────────────────────────────────────────────
+# 出厂固件镜像含 NVS 分区，里面有 WiFi SSID 和明文密码。
+# 这是本机私有备份，只保留 backup/RESTORE.md 说明文档。
+backup/*.bin
+
+# ESP-IDF 离线安装包 1.5GB
+*.exe
+
+# ── 第三方源码，不进本仓库 ──────────────────────────────────────
+# m5stack/StackChan 的克隆（40MB）。我们的改动以 firmware-patch/ 下的
+# 补丁形式保存，见 firmware-patch/README.md。
+StackChan/
+
+# ── 构建产物与日志 ──────────────────────────────────────────────
+*.log
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults.local
+
+# ── 编辑器 / 系统 ───────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+__pycache__/
+*.pyc
+
+# Claude Code 本地设置（含本机绝对路径与权限白名单）
+.claude/settings.local.json

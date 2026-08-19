@@ -1,0 +1,209 @@
+diff --git a/firmware/CMakeLists.txt b/firmware/CMakeLists.txt
+index 5ad5f86..d515d27 100644
+--- a/firmware/CMakeLists.txt
++++ b/firmware/CMakeLists.txt
+@@ -2,7 +2,13 @@
+ # CMakeLists in this exact order for cmake to work correctly
+ cmake_minimum_required(VERSION 3.16)
+ 
+-set(PROJECT_VER "1.4.3")
++# 故意设成远高于官方的版本号，用来永久关闭小智云的自动 OTA。
++# M5Stack 开源的源码版本落后于云端发布版（1.4.3 vs 1.4.4），自建固件一联网
++# 就会被云端自动 OTA 静默覆盖掉。设高版本后 OTA 检查恒返回
++# "Current is the latest version"。
++# 代价：收不到官方固件更新。要回官方请刷 backup/ 的镜像或 M5Stack 出厂恢复
++# 固件，见 backup/RESTORE.md。
++set(PROJECT_VER "9.9.9")
+ add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
+ 
+ # Add this line to disable the specific warning
+diff --git a/firmware/main/CMakeLists.txt b/firmware/main/CMakeLists.txt
+index 22cfebb..8b7eb35 100644
+--- a/firmware/main/CMakeLists.txt
++++ b/firmware/main/CMakeLists.txt
+@@ -305,6 +305,7 @@ idf_component_register(SRCS ${SOURCES}
+                         esp_driver_jpeg
+                         esp_driver_ppa
+                         esp_app_format
++                        esp_http_server
+                         app_update
+                         spi_flash
+                         console
+diff --git a/firmware/main/Kconfig.projbuild b/firmware/main/Kconfig.projbuild
+index 89592a0..22f3a3b 100644
+--- a/firmware/main/Kconfig.projbuild
++++ b/firmware/main/Kconfig.projbuild
+@@ -11,6 +11,18 @@ config STACKCHAN_SERVER_URL
+ 
+ endmenu
+ 
++menu "StackChan Local MCP"
++
++config LOCAL_MCP_TOKEN
++    string "Local MCP shared token"
++    default ""
++    help
++        Optional shared secret for the LAN-side MCP endpoint on port 8080.
++        When non-empty, requests must carry a matching X-Auth-Token header.
++        Leave empty to disable authentication (trusted LAN only).
++
++endmenu
++
+ menu "Xiaozhi Assistant"
+ 
+ config OTA_URL
+diff --git a/firmware/main/hal/hal.h b/firmware/main/hal/hal.h
+index b8d3c80..ef3e033 100644
+--- a/firmware/main/hal/hal.h
++++ b/firmware/main/hal/hal.h
+@@ -212,6 +212,8 @@ public:
+         return _xiaozhi_start_requested;
+     }
+     void startXiaozhi();
++    // 局域网 MCP 通道。必须 public：main.cpp 在 startXiaozhi() 之前从类外调用。
++    void mcp_local_server_init();
+     XiaozhiConfig_t getXiaozhiConfig();
+     void setXiaozhiConfig(XiaozhiConfig_t config);
+ 
+diff --git a/firmware/main/hal/hal_mcp.cpp b/firmware/main/hal/hal_mcp.cpp
+index 0d73851..b6343dd 100644
+--- a/firmware/main/hal/hal_mcp.cpp
++++ b/firmware/main/hal/hal_mcp.cpp
+@@ -8,6 +8,8 @@
+ #include <mcp_server.h>
+ #include <stackchan/stackchan.h>
+ #include <apps/common/common.h>
++#include <board.h>
++#include <display.h>
+ 
+ using namespace stackchan;
+ 
+@@ -146,4 +148,51 @@ void Hal::xiaozhi_mcp_init()
+                            tools::stop_reminder(id);
+                            return true;
+                        });
++
++    mclog::tagInfo(_tag, "add robot.set_emotion tool");
++    mcp_server.AddTool("self.robot.set_emotion",
++                       "Set the robot's facial expression. "
++                       "Valid values: neutral, happy, laughing, angry, sad, crying, sleepy, doubtful. "
++                       "Anything else falls back to neutral. "
++                       "Note: 'sleepy' also stops the idle motion, lowers the head and shows a 'Zzz...' bubble, "
++                       "so only use it when the robot should actually go to sleep.",
++                       PropertyList({Property("emotion", kPropertyTypeString, std::string("neutral"))}),
++                       [this](const PropertyList& properties) -> ReturnValue {
++                           std::string emotion = properties["emotion"].value<std::string>();
++                           if (emotion.empty()) {
++                               emotion = "neutral";
++                           }
++
++                           mclog::tagInfo(_tag, "set_emotion: {}", emotion);
++
++                           // Display::SetEmotion takes the display lock itself,
++                           // so do not wrap it in another LvglLockGuard here.
++                           auto display = Board::GetInstance().GetDisplay();
++                           if (display == nullptr) {
++                               return false;
++                           }
++                           display->SetEmotion(emotion.c_str());
++
++                           return true;
++                       });
++
++    mclog::tagInfo(_tag, "add robot.show_text tool");
++    mcp_server.AddTool("self.robot.show_text",
++                       "Show a short line of text in the robot's speech bubble. "
++                       "Keep it brief; long text is hard to read on a 320x240 screen. "
++                       "This only draws text, it does not speak.",
++                       PropertyList({Property("text", kPropertyTypeString, std::string(""))}),
++                       [this](const PropertyList& properties) -> ReturnValue {
++                           std::string text = properties["text"].value<std::string>();
++
++                           mclog::tagInfo(_tag, "show_text: {}", text);
++
++                           auto display = Board::GetInstance().GetDisplay();
++                           if (display == nullptr) {
++                               return false;
++                           }
++                           display->SetChatMessage("assistant", text.c_str());
++
++                           return true;
++                       });
+ }
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+index 3f11ed6..86ca946 100644
+--- a/firmware/main/main.cpp
++++ b/firmware/main/main.cpp
+@@ -57,6 +57,11 @@ extern "C" void app_main(void)
+         DestroyMooncake();
+     }
+ 
++    // Start the LAN-side MCP endpoint before handing control to xiaozhi.
++    // httpd binds to 0.0.0.0 and simply starts accepting once WiFi gets an IP,
++    // which happens inside startXiaozhi() below.
++    GetHAL().mcp_local_server_init();
++
+     // Start xiaozhi, never returns
+     GetHAL().startXiaozhi();
+ }
+diff --git a/firmware/patches/xiaozhi-esp32.patch b/firmware/patches/xiaozhi-esp32.patch
+index a580fbc..82467a5 100644
+--- a/firmware/patches/xiaozhi-esp32.patch
++++ b/firmware/patches/xiaozhi-esp32.patch
+@@ -271,3 +271,56 @@ index 7bc917b..874b137 100644
+  };
+  
+  #endif // I2C_DEVICE_H
++diff --git a/main/mcp_server.cc b/main/mcp_server.cc
++index 7cd7ba0..97c183c 100644
++--- a/main/mcp_server.cc
+++++ b/main/mcp_server.cc
++@@ -440,6 +440,9 @@ void McpServer::ReplyResult(int id, const std::string& result) {
++     payload += std::to_string(id) + ",\"result\":";
++     payload += result;
++     payload += "}";
+++    if (local_reply_sink_ && local_reply_sink_(id, payload)) {
+++        return;
+++    }
++     Application::GetInstance().SendMcpMessage(payload);
++ }
++ 
++@@ -449,6 +452,9 @@ void McpServer::ReplyError(int id, const std::string& message) {
++     payload += ",\"error\":{\"message\":\"";
++     payload += message;
++     payload += "\"}}";
+++    if (local_reply_sink_ && local_reply_sink_(id, payload)) {
+++        return;
+++    }
++     Application::GetInstance().SendMcpMessage(payload);
++ }
++ 
++diff --git a/main/mcp_server.h b/main/mcp_server.h
++index dacdd55..c5bde7e 100644
++--- a/main/mcp_server.h
+++++ b/main/mcp_server.h
++@@ -326,6 +326,16 @@ public:
++     void ParseMessage(const cJSON* json);
++     void ParseMessage(const std::string& message);
++ 
+++    // LAN-side MCP channel support.
+++    //
+++    // Replies always go out through Application::SendMcpMessage(), i.e. to the
+++    // xiaozhi cloud. This sink lets a locally originated request intercept its
+++    // own reply before it is sent. Returning true means "claimed" and the cloud
+++    // never sees it; returning false keeps the original behaviour untouched.
+++    // Callers distinguish local requests by id range. See hal/hal_mcp_local.cpp.
+++    using LocalReplySink = std::function<bool(int id, const std::string& payload)>;
+++    void SetLocalReplySink(LocalReplySink sink) { local_reply_sink_ = std::move(sink); }
+++
++ private:
++     McpServer();
++     ~McpServer();
++@@ -339,6 +349,7 @@ private:
++     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
++ 
++     std::vector<McpTool*> tools_;
+++    LocalReplySink local_reply_sink_;
++ };
++ 
++ #endif // MCP_SERVER_H

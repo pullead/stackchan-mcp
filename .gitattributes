@@ -1,0 +1,16 @@
+# 补丁文件必须保持 LF，否则 Windows 上 core.autocrlf=true 会把它们转成 CRLF，
+# 导致 git apply 失败。这正是本项目在上游 m5stack/StackChan 遇到的坑，
+# 详见 DEVLOG.md 第四节第 3 条。
+*.patch          -text
+02-gitattributes -text
+
+# PowerShell 脚本是 UTF-8 BOM + CRLF：BOM 不能丢，否则 PS 5.1 会按系统 ANSI
+# 解码，中文注释乱码导致语法错误。用 -text 让 git 原样存取，不做任何转换。
+*.ps1            -text
+
+# 其余文本统一 LF 入库
+*.md   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+*.cpp  text eol=lf
+*.h    text eol=lf

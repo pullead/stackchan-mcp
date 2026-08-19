@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stackchan": {
+      "command": "python",
+      "args": ["C:/Users/tei_s/Documents/stackchan/bridge/stackchan_mcp_bridge.py"],
+      "env": {
+        "STACKCHAN_HOST": "172.16.10.36",
+        "STACKCHAN_PORT": "8080"
+      }
+    }
+  }
+}
