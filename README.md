@@ -57,7 +57,8 @@ M5Stack 的官方固件本身就是 [78/xiaozhi-esp32](https://github.com/78/xia
 
 设备自带 18 个 + 本项目新增 2 个：
 
-- **新增**：`self.robot.set_emotion`、`self.robot.show_text`
+- **新增**：`self.robot.set_emotion`（8 个取值，`hold_seconds` 默认 15 秒防止被待机动画覆盖）、
+  `self.robot.show_text`（`duration_seconds` 默认 8 秒后自动清空）
 - 头部：`set_head_angles` / `get_head_angles`
 - 灯光：`set_led_color`
 - 相机：`take_photo`

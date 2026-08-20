@@ -52,6 +52,96 @@ index 89592a0..22f3a3b 100644
  menu "Xiaozhi Assistant"
  
  config OTA_URL
+diff --git a/firmware/main/hal/board/stackchan_display.cc b/firmware/main/hal/board/stackchan_display.cc
+index 7459888..dba7144 100644
+--- a/firmware/main/hal/board/stackchan_display.cc
++++ b/firmware/main/hal/board/stackchan_display.cc
+@@ -203,6 +203,11 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
+         esp_timer_delete(preview_timer_);
+     }
+ 
++    if (idle_expr_resume_timer_ != nullptr) {
++        esp_timer_stop(idle_expr_resume_timer_);
++        esp_timer_delete(idle_expr_resume_timer_);
++    }
++
+     if (preview_image_ != nullptr) {
+         lv_obj_del(preview_image_);
+     }
+@@ -297,6 +302,46 @@ void StackChanAvatarDisplay::LvglUnlock()
+     Unlock();
+ }
+ 
++void StackChanAvatarDisplay::SuppressIdleExpression(int seconds)
++{
++    auto& stackchan = GetStackChan();
++
++    if (idle_expr_resume_timer_ != nullptr) {
++        esp_timer_stop(idle_expr_resume_timer_);
++    }
++
++    DisplayLockGuard lock(this);
++
++    if (seconds <= 0) {
++        // 恢复。只有小智确实处于 idle 时才补回去，否则交给正常的状态切换逻辑，
++        // 避免在非 idle 状态下凭空挂上一个待机动画。
++        if (hal_bridge::is_xiaozhi_idle() && idle_expression_modifier_id_ < 0) {
++            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
++        }
++        return;
++    }
++
++    if (idle_expression_modifier_id_ >= 0) {
++        stackchan.removeModifier(idle_expression_modifier_id_);
++        idle_expression_modifier_id_ = -1;
++    }
++
++    if (idle_expr_resume_timer_ == nullptr) {
++        esp_timer_create_args_t args = {
++            .callback =
++                [](void* arg) {
++                    static_cast<StackChanAvatarDisplay*>(arg)->SuppressIdleExpression(0);
++                },
++            .arg                   = this,
++            .dispatch_method       = ESP_TIMER_TASK,
++            .name                  = "idle_expr_resume",
++            .skip_unhandled_events = true,
++        };
++        esp_timer_create(&args, &idle_expr_resume_timer_);
++    }
++    esp_timer_start_once(idle_expr_resume_timer_, (uint64_t)seconds * 1000000ULL);
++}
++
+ void StackChanAvatarDisplay::CreateIdleMotionModifier()
+ {
+     auto& stackchan = GetStackChan();
+diff --git a/firmware/main/hal/board/stackchan_display.h b/firmware/main/hal/board/stackchan_display.h
+index f16f1f3..8238636 100644
+--- a/firmware/main/hal/board/stackchan_display.h
++++ b/firmware/main/hal/board/stackchan_display.h
+@@ -23,6 +23,7 @@ private:
+ 
+     lv_obj_t* preview_image_                         = nullptr;
+     esp_timer_handle_t preview_timer_                = nullptr;
++    esp_timer_handle_t idle_expr_resume_timer_       = nullptr;
+     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
+ 
+     void CreateIdleMotionModifier();
+@@ -38,6 +39,14 @@ public:
+ 
+     void InitializeLcdThemes();
+ 
++    // 临时摘掉待机表情动画，让外部（MCP）设的表情能停留住。
++    // IdleExpressionModifier 每 2-6 秒会随机改动五官、并有 20% 概率
++    // reset_to_neutral()，不摘掉的话设完表情几秒就被抹平。
++    // 比 avatar.setModifyLock() 精准：眨眼不受影响。
++    //   seconds > 0  抑制该秒数，到点自动恢复
++    //   seconds <= 0 立即恢复
++    void SuppressIdleExpression(int seconds);
++
+     // Override Display methods to control Robot
+     virtual void SetEmotion(const char* emotion) override;
+     virtual void SetChatMessage(const char* role, const char* content) override;
 diff --git a/firmware/main/hal/hal.h b/firmware/main/hal/hal.h
 index b8d3c80..ef3e033 100644
 --- a/firmware/main/hal/hal.h
@@ -66,19 +156,60 @@ index b8d3c80..ef3e033 100644
      void setXiaozhiConfig(XiaozhiConfig_t config);
  
 diff --git a/firmware/main/hal/hal_mcp.cpp b/firmware/main/hal/hal_mcp.cpp
-index 0d73851..b6343dd 100644
+index 0d73851..e1a2fc7 100644
 --- a/firmware/main/hal/hal_mcp.cpp
 +++ b/firmware/main/hal/hal_mcp.cpp
-@@ -8,6 +8,8 @@
+@@ -8,11 +8,49 @@
  #include <mcp_server.h>
  #include <stackchan/stackchan.h>
  #include <apps/common/common.h>
 +#include <board.h>
 +#include <display.h>
++#include <hal/board/stackchan_display.h>
++#include <esp_timer.h>
  
  using namespace stackchan;
  
-@@ -146,4 +148,51 @@ void Hal::xiaozhi_mcp_init()
+ static const std::string_view _tag = "HAL-MCP";
+ 
++namespace {
++
++// show_text 的气泡不会自己消失，这里用一个一次性定时器到点清空。
++// 小智助手说话时的气泡是它自己管理的，不受影响。
++esp_timer_handle_t g_speech_clear_timer = nullptr;
++
++void speech_clear_cb(void*)
++{
++    auto display = Board::GetInstance().GetDisplay();
++    if (display != nullptr) {
++        display->SetChatMessage("assistant", "");
++    }
++}
++
++void schedule_speech_clear(int seconds)
++{
++    if (g_speech_clear_timer == nullptr) {
++        esp_timer_create_args_t args = {
++            .callback              = speech_clear_cb,
++            .arg                   = nullptr,
++            .dispatch_method       = ESP_TIMER_TASK,
++            .name                  = "speech_clear",
++            .skip_unhandled_events = true,
++        };
++        esp_timer_create(&args, &g_speech_clear_timer);
++    }
++    esp_timer_stop(g_speech_clear_timer);
++    if (seconds > 0) {
++        esp_timer_start_once(g_speech_clear_timer, (uint64_t)seconds * 1000000ULL);
++    }
++}
++
++}  // namespace
++
+ void Hal::xiaozhi_mcp_init()
+ {
+     mclog::tagInfo(_tag, "init");
+@@ -146,4 +184,66 @@ void Hal::xiaozhi_mcp_init()
                             tools::stop_reminder(id);
                             return true;
                         });
@@ -89,15 +220,19 @@ index 0d73851..b6343dd 100644
 +                       "Valid values: neutral, happy, laughing, angry, sad, crying, sleepy, doubtful. "
 +                       "Anything else falls back to neutral. "
 +                       "Note: 'sleepy' also stops the idle motion, lowers the head and shows a 'Zzz...' bubble, "
-+                       "so only use it when the robot should actually go to sleep.",
-+                       PropertyList({Property("emotion", kPropertyTypeString, std::string("neutral"))}),
++                       "so only use it when the robot should actually go to sleep. "
++                       "hold_seconds keeps the expression from being overwritten by the idle animation "
++                       "(default 15s; 0 means do not hold, the face drifts back within a few seconds).",
++                       PropertyList({Property("emotion", kPropertyTypeString, std::string("neutral")),
++                                     Property("hold_seconds", kPropertyTypeInteger, 15, 0, 300)}),
 +                       [this](const PropertyList& properties) -> ReturnValue {
 +                           std::string emotion = properties["emotion"].value<std::string>();
++                           int hold            = properties["hold_seconds"].value<int>();
 +                           if (emotion.empty()) {
 +                               emotion = "neutral";
 +                           }
 +
-+                           mclog::tagInfo(_tag, "set_emotion: {}", emotion);
++                           mclog::tagInfo(_tag, "set_emotion: {} hold={}s", emotion, hold);
 +
 +                           // Display::SetEmotion takes the display lock itself,
 +                           // so do not wrap it in another LvglLockGuard here.
@@ -107,6 +242,11 @@ index 0d73851..b6343dd 100644
 +                           }
 +                           display->SetEmotion(emotion.c_str());
 +
++                           // 不摘掉待机表情动画的话，IdleExpressionModifier 每 2-6 秒就会
++                           // 改动五官、并有 20% 概率 reset_to_neutral()，表情活不过几秒。
++                           auto* sc = static_cast<StackChanAvatarDisplay*>(display);
++                           sc->SuppressIdleExpression(hold);
++
 +                           return true;
 +                       });
 +
@@ -114,18 +254,24 @@ index 0d73851..b6343dd 100644
 +    mcp_server.AddTool("self.robot.show_text",
 +                       "Show a short line of text in the robot's speech bubble. "
 +                       "Keep it brief; long text is hard to read on a 320x240 screen. "
-+                       "This only draws text, it does not speak.",
-+                       PropertyList({Property("text", kPropertyTypeString, std::string(""))}),
++                       "This only draws text, it does not speak. "
++                       "The bubble clears itself after duration_seconds (default 8; 0 keeps it forever). "
++                       "Pass an empty text to clear it immediately.",
++                       PropertyList({Property("text", kPropertyTypeString, std::string("")),
++                                     Property("duration_seconds", kPropertyTypeInteger, 8, 0, 600)}),
 +                       [this](const PropertyList& properties) -> ReturnValue {
 +                           std::string text = properties["text"].value<std::string>();
++                           int duration     = properties["duration_seconds"].value<int>();
 +
-+                           mclog::tagInfo(_tag, "show_text: {}", text);
++                           mclog::tagInfo(_tag, "show_text: {} duration={}s", text, duration);
 +
 +                           auto display = Board::GetInstance().GetDisplay();
 +                           if (display == nullptr) {
 +                               return false;
 +                           }
 +                           display->SetChatMessage("assistant", text.c_str());
++
++                           schedule_speech_clear(text.empty() ? 0 : duration);
 +
 +                           return true;
 +                       });

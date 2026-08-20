@@ -77,6 +77,8 @@ CMakeLists 注释掉的 `emote_display.cc`）。
 | `firmware/main/Kconfig.projbuild` | 新增 `LOCAL_MCP_TOKEN`（可选鉴权，默认空） |
 | `firmware/main/hal/hal.h` | public 区加 `mcp_local_server_init()` 声明 |
 | `firmware/main/hal/hal_mcp.cpp` | 新增 `self.robot.set_emotion` 和 `self.robot.show_text` |
+| `firmware/main/hal/board/stackchan_display.h` | 加 `SuppressIdleExpression()` 声明和恢复用定时器 |
+| `firmware/main/hal/board/stackchan_display.cc` | 实现 `SuppressIdleExpression()`，临时摘掉待机表情动画 |
 | `firmware/main/main.cpp` | `startXiaozhi()` 前调用 `mcp_local_server_init()` |
 | `firmware/patches/xiaozhi-esp32.patch` | 追加 4 个 hunk，给 `McpServer` 加 reply sink |
 

@@ -128,6 +128,57 @@ ESP32-S3 原生 USB-Serial/JTAG 配 stub flasher 做大块读取会报 `Packet c
 - **单元素数组会解包成字符串**，splat 时按字符枚举（`build` 变成 `b,u,i,l,d`，报 `ninja: unknown target 'b'`）。必须用 `@(...)` 强制成数组。
 - 别用 `$ErrorActionPreference = 'Stop'` 配合流重定向：PS 5.1 会把原生命令（git 等）写到 stderr 的**正常信息**包装成 `NativeCommandError` 直接中断脚本。一律显式检查 `$LASTEXITCODE`。
 
+### 7. 表情设了会被待机动画覆盖（不是 bug，是设计冲突）
+
+`set_emotion` 返回 true、视觉上也确实变了，但**几秒后就被改回去**。
+
+原因：小智助手空闲时，`stackchan_display.cc` 会挂上 `IdleExpressionModifier`
+（见 `stackchan/modifiers/idle_expression.h`）。它每 2-6 秒随机动一次五官：
+
+- 70% 概率位移眼睛(±20px)和嘴巴
+- 10% 概率歪嘴
+- **20% 概率 `reset_to_neutral()`** —— 把眼睛 size、嘴巴 rotation/weight 全部归零
+
+而表情正是靠这些属性表现的。机器人大部分时间是空闲的，所以表情总是活不过几秒。
+**这是官方固件的既定行为，不是缺陷** —— 我们的 MCP 工具在跟它抢。
+
+**解法**：给 `StackChanAvatarDisplay` 加 `SuppressIdleExpression(seconds)`，
+临时摘掉这个修饰器，用 esp_timer 到点自动恢复。`set_emotion` 加 `hold_seconds`
+参数（默认 15）调它。
+
+**没有用 `avatar.setModifyLock(true)`**：那个虽然一行就能挡住待机动画，但
+`BlinkModifier` 也检查同一个锁，会把眨眼一起停掉，脸看起来像死了。
+
+顺带 `show_text` 也补了 `duration_seconds`（默认 8 秒自动清空）——
+原来设完就永久留在屏幕上，不会自己消失。
+
+### 8. 验证视觉效果的正确方法
+
+`self.screen.snapshot` 能把屏幕 JPEG 传到指定 URL，**在 PC 上起个接收服务就能
+真的看到屏幕**，不用靠肉眼观察和口头描述。这个能力应该早点用上。
+
+两个坑：
+
+- 设备用 `multipart/form-data` + **`Transfer-Encoding: chunked`** 上传，
+  接收端只读 `Content-Length` 会拿到 0 字节。要按 chunked 解析，或者干脆
+  裸 socket 收完再从字节流里按 `ÿØ` / `ÿÙ` 抠 JPEG。
+- 工具**总是返回 true**。上传失败也返回 true，只有串口日志
+  （`MCP: Upload snapshot N bytes to ...` 和 `Snapshot screen result: ...`）
+  才能确认到底成没成。
+
+**比对图片时要避开眨眼的干扰。** 直接做整图像素差会被眨眼主导，得出错误结论
+（实测因此误判过一次「保持未生效」）。可靠指标是**白色像素的重心坐标**：
+待机动画靠位移五官制造变化，会明显移动重心；而眨眼只改变面积、基本不动重心。
+
+实测数据（angry 表情，每 3 秒采样一次，共 6 次）：
+
+| | x 漂移 | y 漂移 |
+|---|---|---|
+| `hold_seconds=60` | 0.22 px | 3.44 px |
+| `hold_seconds=0` | 2.58 px | 10.89 px |
+
+横向差 12 倍。残留的纵向漂移是眨眼造成的，符合预期。
+
 ## 五、验证结果
 
 ```
@@ -205,6 +256,7 @@ COM 口默认 `COM6`，用 `$env:STACKCHAN_PORT_COM` 覆盖。
 - 设备 IP 硬编码，DHCP 换址后要改
 - 局域网端点默认不鉴权（`LOCAL_MCP_TOKEN` 留了口子但没启用）
 - `laughing` 和 `happy` 在固件里映射到同一张脸，`crying` 和 `sad` 同理。实际只有 6 张不同的脸：neutral / happy / angry / sad / sleepy / doubtful
+- `set_emotion` 的 `hold_seconds` 到期后表情会回归待机动画，这是刻意设计；需要长期保持就传大一点的值（上限 300 秒）
 - ESP32 开了 WiFi 省电（`wifi:pm start, type: 1`），首次请求偶发超时，ping 延迟能涨到 2 秒 —— 桥接里的重试是必要的
 
 **可以做的**
