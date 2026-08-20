@@ -78,6 +78,8 @@ CMakeLists 注释掉的 `emote_display.cc`）。
 | `firmware/main/hal/hal.h` | public 区加 `mcp_local_server_init()` 声明 |
 | `firmware/main/hal/hal_mcp.cpp` | 新增 `self.robot.set_emotion` 和 `self.robot.show_text` |
 | `firmware/main/hal/board/stackchan_display.h` | 加 `SuppressIdleExpression()` 声明和恢复用定时器 |
+| `firmware/main/stackchan/avatar/skins/default/speech_bubble.cpp` | 气泡重做：漫画风、按字数自动选上下位置、偏移投影、加粗尾巴 |
+| `firmware/main/stackchan/avatar/skins/default/default.h` | 气泡类加投影与尾巴投影图层成员 |
 | `firmware/main/hal/board/stackchan_display.cc` | 实现 `SuppressIdleExpression()`；`SetEmotion` 改表驱动，认全 21 个小智情绪词并配装饰器 |
 | `firmware/main/main.cpp` | `startXiaozhi()` 前调用 `mcp_local_server_init()` |
 | `firmware/patches/xiaozhi-esp32.patch` | 追加 4 个 hunk，给 `McpServer` 加 reply sink |

@@ -53,7 +53,7 @@ index 89592a0..22f3a3b 100644
  
  config OTA_URL
 diff --git a/firmware/main/hal/board/stackchan_display.cc b/firmware/main/hal/board/stackchan_display.cc
-index 7459888..bfacdb8 100644
+index 7459888..a826667 100644
 --- a/firmware/main/hal/board/stackchan_display.cc
 +++ b/firmware/main/hal/board/stackchan_display.cc
 @@ -15,6 +15,7 @@
@@ -290,6 +290,18 @@ index 7459888..bfacdb8 100644
      }
  
      // Resync blink modifier base eye weights
+@@ -459,6 +600,11 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
+ 
+     DisplayLockGuard lock(this);
+ 
++    // 气泡沿用主题字体。曾试过换成编译进固件的 font_puhui_basic_16_4 想多排一行，
++    // 结果满屏缺字——那个字体只有 801 个字形。实际在用的是资源分区里的
++    // font_puhui_common_20_4（完整常用字集），主题拿到的就是它。
++    // 编译进固件的完整版 font_puhui_16_4 有 6650 字形够用，但要多占约 860KB，
++    // 而 app 分区只剩 1.29MB，为小 4px 不值得。
+     auto lvgl_theme = static_cast<LvglTheme*>(theme);
+     auto text_font  = lvgl_theme->text_font()->font();
+ 
 diff --git a/firmware/main/hal/board/stackchan_display.h b/firmware/main/hal/board/stackchan_display.h
 index f16f1f3..63412e4 100644
 --- a/firmware/main/hal/board/stackchan_display.h
@@ -660,6 +672,272 @@ index 3f11ed6..86ca946 100644
 +
      // Start xiaozhi, never returns
      GetHAL().startXiaozhi();
+ }
+diff --git a/firmware/main/stackchan/avatar/skins/default/default.h b/firmware/main/stackchan/avatar/skins/default/default.h
+index e4d3400..c11f0d2 100644
+--- a/firmware/main/stackchan/avatar/skins/default/default.h
++++ b/firmware/main/stackchan/avatar/skins/default/default.h
+@@ -87,6 +87,9 @@ public:
+ 
+ private:
+     std::unique_ptr<uitk::lvgl_cpp::Container> _container;
++    std::unique_ptr<uitk::lvgl_cpp::Container> _shadow;    // 偏移的色块，做漫画风投影
++    std::unique_ptr<uitk::lvgl_cpp::Image> _arrow_shadow;  // 尾巴的投影层
++    std::unique_ptr<uitk::lvgl_cpp::Image> _arrow_outline;  // 尾巴的黑色描边层，垫在 _arrow 下面
+     std::unique_ptr<uitk::lvgl_cpp::Image> _arrow;
+     std::unique_ptr<uitk::lvgl_cpp::Container> _bubble;
+     std::unique_ptr<uitk::lvgl_cpp::Label> _text;
+diff --git a/firmware/main/stackchan/avatar/skins/default/speech_bubble.cpp b/firmware/main/stackchan/avatar/skins/default/speech_bubble.cpp
+index b7ae42b..27ab66b 100644
+--- a/firmware/main/stackchan/avatar/skins/default/speech_bubble.cpp
++++ b/firmware/main/stackchan/avatar/skins/default/speech_bubble.cpp
+@@ -4,23 +4,103 @@
+  * SPDX-License-Identifier: MIT
+  */
+ #include "default.h"
++#include <string>
+ 
+ using namespace uitk;
+ using namespace uitk::lvgl_cpp;
+ using namespace stackchan::avatar;
+ 
+-static const Vector2i _container_pos  = Vector2i(0, 89);
+-static const Vector2i _container_size = Vector2i(320, 74);
+-static const Vector2i _arrow_offset   = Vector2i(40, -15);
+-static const int _text_mx             = 20;
+-static const int _bubble_min_width    = 90;
+-static const int _bubble_max_width    = 340;
+-static const int _bubble_height       = 52;
+-static const int _bubble_min_offset_x = 66;
+-static const int _bubble_max_offset_x = 0;
++// 漫画风对话框，按文本长度自动选位置。
++//
++//   短文本 -> 嘴巴下方，单行，尾巴朝上指着嘴（官方语义：它在说话）
++//   长文本 -> 脸上方，最多两行，尾巴朝下指着脸（下方放不下，挪到有地方的那头）
++//
++// 为什么下方只能单行：屏幕 320x240，LV_ALIGN_CENTER 下 y=0 对应屏幕 y=120。
++// 嘴巴中心在屏幕 146，说话时会张大（最大 60x50）并偏移 ±16，最坏情况底边到 187，
++// 到屏幕底 240 只剩 53px。官方原设计也是单行 + 横向滚动，是自洽的。
++// 上方眼睛顶边约 88（待机时还会上移），留给气泡 6..86，够两行。
++//
++// 三个踩过的坑，改之前先看：
++//   - **不要给气泡加黑描边。** 屏幕底色是黑的，黑描边等于隐形。参考图能看见
++//     描边是因为它底色是白的。这里靠白气泡本身和偏移投影来立体化。
++//   - **不要用 LVGL 的 shadow 样式。** `shadow_width` 是模糊半径，设 0 等于
++//     不画阴影，做不出硬边偏移色块。投影用独立容器铺在下面。
++//   - **不要用 SCROLL_CIRCULAR 配多行。** 那是单行横向滚动，跟自动换行互斥。
++
++// 容器铺满整屏，子元素统一用 TOP_MID 对齐，y 就是屏幕绝对坐标，好算
++static const Vector2i _container_size = Vector2i(320, 240);
++
++static const int _tail_w        = 28;   // default_bubble_arrow 素材尺寸
++static const int _tail_h        = 32;
++static const int _tail_scale    = 384;  // LVGL 缩放，256 = 原始大小，384 = 1.5 倍
++static const int _tail_visible  = 20;   // 尾巴露出气泡外的高度（缩放后的像素）
++static const int _tail_offset_x = 34;   // 尾巴偏右，正中显得呆板
++
++// 缩放后的实际尺寸。素材是个尖端朝外、基部朝气泡的三角，露出得越多基部越宽，
++// 所以「加粗」= 放大 + 多露一截。原来 1.0 倍只露 14px 时基部才 11px，太细。
++static const int _tail_draw_h = _tail_h * _tail_scale / 256;
++// LVGL 放大图片是以中心为基准向四周扩展的，对象坐标不变、绘制内容溢出原始边框。
++// 定位时要把这段溢出补进去，不然尾巴会偏。
++static const int _tail_overhang = (_tail_draw_h - _tail_h) / 2;
++
++static const int _shadow_dx = 4;
++static const int _shadow_dy = 4;
++static const lv_color_t _shadow_color = LV_COLOR_MAKE(0x4A, 0x90, 0xD9);
++
++// 上方布局
++static const int _top_y          = 6;   // 距屏幕上沿的留白
++static const int _top_max_height = 66;  // 再高尾巴就戳到眼睛了
++
++// 下方布局
++static const int _bottom_y          = 236;  // 气泡底边，距屏幕下沿 4px
++static const int _bottom_max_height = 36;   // 单行；再高尾巴会戳进张大的嘴
++
++// 切换位置的阈值：超过这么多字就放不进下方单行，挪到上方
++static const int _top_threshold_chars = 12;
++
++// 按文本长度分档，每档换一套边距和圆角。字少时圆胖像小声嘀咕，
++// 字多时收紧边距腾出显示空间。
++struct BubbleTier {
++    int max_chars;
++    int text_mx;
++    int text_my;
++    int radius;
++    int min_width;
++};
++
++static const BubbleTier _tiers[] = {
++    {3,   24, 6,  18, 96},   // XS 一两个字，圆胖（下方单行）
++    {12,  20, 6,  16, 128},  // S  单行（下方）
++    {24,  16, 10, 20, 186},  // M  两行（上方）
++    {999, 12,  8, 16, 232},  // L  两行满，边距最紧（上方）
++};
++
++static const int _bubble_max_width = 292;
+ 
+ LV_IMAGE_DECLARE(default_bubble_arrow);
+ 
++// UTF-8 字符数（不是字节数），中英文混排时分档才准
++static int utf8_len(std::string_view s)
++{
++    int n = 0;
++    for (unsigned char c : s) {
++        if ((c & 0xC0) != 0x80) {
++            n++;
++        }
++    }
++    return n;
++}
++
++static const BubbleTier& pick_tier(int chars)
++{
++    for (const auto& t : _tiers) {
++        if (chars <= t.max_chars) {
++            return t;
++        }
++    }
++    return _tiers[sizeof(_tiers) / sizeof(_tiers[0]) - 1];
++}
++
+ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryColor, lv_color_t secondaryColor,
+                                          const lv_font_t* font)
+ {
+@@ -31,24 +111,43 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
+     _container->setBgOpa(0);
+     _container->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+     _container->setSize(_container_size.x, _container_size.y);
+-    _container->setPos(_container_pos.x, _container_pos.y);
++    _container->setPos(0, 0);
+     _container->setPadding(0, 0, 0, 0);
+ 
++    // 创建顺序即绘制顺序，先建的在下层：投影 -> 尾巴 -> 气泡 -> 文字。
++    // 尾巴要垫在气泡下面，气泡才能盖住它埋进去的那半截。
++
++    _shadow = std::make_unique<Container>(_container->get());
++    _shadow->setAlign(LV_ALIGN_TOP_MID);
++    _shadow->setBorderWidth(0);
++    _shadow->setBgColor(_shadow_color);
++    _shadow->setBgOpa(LV_OPA_COVER);
++    _shadow->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
++    _shadow->setPadding(0, 0, 0, 0);
++
++    _arrow_shadow = std::make_unique<Image>(_container->get());
++    _arrow_shadow->setSrc(&default_bubble_arrow);
++    _arrow_shadow->setAlign(LV_ALIGN_TOP_MID);
++    _arrow_shadow->setTransformPivot(_tail_w / 2, _tail_h / 2);
++    _arrow_shadow->setScale(_tail_scale);
++    _arrow_shadow->setImageRecolorOpa(LV_OPA_COVER);
++    _arrow_shadow->setImageRecolor(_shadow_color);
++
+     _arrow = std::make_unique<Image>(_container->get());
+     _arrow->setSrc(&default_bubble_arrow);
+-    _arrow->setAlign(LV_ALIGN_CENTER);
+-    _arrow->setPos(_arrow_offset.x, _arrow_offset.y);
++    _arrow->setAlign(LV_ALIGN_TOP_MID);
++    _arrow->setTransformPivot(_tail_w / 2, _tail_h / 2);
++    _arrow->setScale(_tail_scale);
+     _arrow->setImageRecolorOpa(LV_OPA_COVER);
+     _arrow->setImageRecolor(primaryColor);
+ 
+     _bubble = std::make_unique<Container>(_container->get());
+-    _bubble->setRadius(LV_RADIUS_CIRCLE);
+-    _bubble->setAlign(LV_ALIGN_CENTER);
+-    _bubble->setBorderWidth(0);
++    _bubble->setAlign(LV_ALIGN_TOP_MID);
+     _bubble->setBgColor(primaryColor);
++    _bubble->setBgOpa(LV_OPA_COVER);
++    _bubble->setBorderWidth(0);
+     _bubble->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+-    _bubble->setSize(_bubble_max_width, _bubble_height);
+-    _bubble->setPos(0, 11);
++    _bubble->setPadding(0, 0, 0, 0);
+ 
+     _text = std::make_unique<Label>(_bubble->get());
+     _text->setTextColor(secondaryColor);
+@@ -56,8 +155,7 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
+     _text->setTextAlign(LV_TEXT_ALIGN_CENTER);
+     _text->setAlign(LV_ALIGN_CENTER);
+     _text->setPos(0, 0);
+-    _text->setWidth(320 - _text_mx * 2);
+-    _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
++    _text->setLongMode(LV_LABEL_LONG_MODE_WRAP);
+ 
+     clearSpeech();
+ }
+@@ -67,6 +165,9 @@ DefaultSpeechBubble::~DefaultSpeechBubble()
+     _text.reset();
+     _bubble.reset();
+     _arrow.reset();
++    _arrow_shadow.reset();
++    _arrow_outline.reset();
++    _shadow.reset();
+     _container.reset();
+ }
+ 
+@@ -77,19 +178,53 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
+         return;
+     }
+ 
+-    _text->setText(text);
++    // string_view 不保证以 \0 结尾，而 lv_text_get_size 要 const char*
++    std::string buf(text);
++    const int chars = utf8_len(text);
++    const bool on_top = chars > _top_threshold_chars;
+ 
+-    lv_point_t text_size;
+-    lv_text_get_size(&text_size, text.data(), _text->getTextFont(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
++    const BubbleTier& tier = pick_tier(chars);
++    const int max_height   = on_top ? _top_max_height : _bottom_max_height;
+ 
+-    int bubble_width = min(text_size.x + _text_mx * 2, _bubble_max_width);
+-    bubble_width     = max(bubble_width, _bubble_min_width);
++    _text->setText(buf);
+ 
+-    auto bubble_offset_x =
+-        map_range(bubble_width, _bubble_min_width, _bubble_max_width, _bubble_min_offset_x, _bubble_max_offset_x);
++    // 按该档的可用宽度量一次换行后的尺寸，据此定气泡大小
++    const int max_text_w = _bubble_max_width - tier.text_mx * 2;
++    lv_point_t text_size;
++    lv_text_get_size(&text_size, buf.c_str(), _text->getTextFont(), 0, 0, max_text_w, LV_TEXT_FLAG_NONE);
++
++    int w = text_size.x + tier.text_mx * 2;
++    w     = max(min(w, _bubble_max_width), tier.min_width);
++
++    int h = text_size.y + tier.text_my * 2;
++    h     = min(h, max_height);
++
++    _bubble->setRadius(tier.radius);
++    _bubble->setSize(w, h);
++    _text->setWidth(w - tier.text_mx * 2);
++
++    _shadow->setRadius(tier.radius);
++    _shadow->setSize(w, h);
++
++    int bubble_y, tail_y, rotation;
++    if (on_top) {
++        // 尾巴在气泡下边缘，绘制内容的底边要落在 气泡底 + _tail_visible 处
++        bubble_y = _top_y;
++        tail_y   = bubble_y + h + _tail_visible - _tail_h - _tail_overhang;
++        rotation = 1800;  // 朝下指着脸
++    } else {
++        // 尾巴在气泡上边缘，绘制内容的顶边要落在 气泡顶 - _tail_visible 处
++        bubble_y = _bottom_y - h;
++        tail_y   = bubble_y - _tail_visible + _tail_overhang;
++        rotation = 0;  // 素材原始朝向就是朝上，指着嘴
++    }
+ 
+-    _bubble->setWidth(bubble_width);
+-    _bubble->setX(bubble_offset_x);
++    _bubble->setPos(0, bubble_y);
++    _shadow->setPos(_shadow_dx, bubble_y + _shadow_dy);
++    _arrow->setRotation(rotation);
++    _arrow->setPos(_tail_offset_x, tail_y);
++    _arrow_shadow->setRotation(rotation);
++    _arrow_shadow->setPos(_tail_offset_x + _shadow_dx, tail_y + _shadow_dy);
+ 
+     setVisible(true);
  }
 diff --git a/firmware/patches/xiaozhi-esp32.patch b/firmware/patches/xiaozhi-esp32.patch
 index a580fbc..82467a5 100644
