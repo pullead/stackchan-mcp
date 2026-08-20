@@ -53,10 +53,18 @@ index 89592a0..22f3a3b 100644
  
  config OTA_URL
 diff --git a/firmware/main/hal/board/stackchan_display.cc b/firmware/main/hal/board/stackchan_display.cc
-index 7459888..dba7144 100644
+index 7459888..bfacdb8 100644
 --- a/firmware/main/hal/board/stackchan_display.cc
 +++ b/firmware/main/hal/board/stackchan_display.cc
-@@ -203,6 +203,11 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
+@@ -15,6 +15,7 @@
+ #include <lvgl.h>
+ #include <lvgl_theme.h>
+ #include <stackchan/stackchan.h>
++#include <stackchan/avatar/decorators/decorators.h>
+ #include <assets/lang_config.h>
+ #include <hal/hal.h>
+ 
+@@ -203,6 +204,11 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
          esp_timer_delete(preview_timer_);
      }
  
@@ -68,7 +76,7 @@ index 7459888..dba7144 100644
      if (preview_image_ != nullptr) {
          lv_obj_del(preview_image_);
      }
-@@ -297,6 +302,46 @@ void StackChanAvatarDisplay::LvglUnlock()
+@@ -297,6 +303,46 @@ void StackChanAvatarDisplay::LvglUnlock()
      Unlock();
  }
  
@@ -115,19 +123,187 @@ index 7459888..dba7144 100644
  void StackChanAvatarDisplay::CreateIdleMotionModifier()
  {
      auto& stackchan = GetStackChan();
+@@ -318,6 +364,64 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
+     }
+ }
+ 
++namespace {
++
++// 叠加在脸上的小装饰，素材是固件自带的
++enum class Deco { None, Heart, Angry, Sweat, Shy, Dizzy };
++
++struct EmotionEntry {
++    const char* name;
++    Emotion face;
++    Deco deco;
++};
++
++// 小智云端在对话中下发的情绪词表（application.cc 的 "llm" 消息），
++// 共 21 个。底层 avatar 只有 6 张基础脸，所以靠装饰器拉开区分度。
++//
++// 原来这里只认 8 个词，其余 13 个全部回落 neutral，语音对话时几乎看不出
++// 表情变化。另外原来认的 "doubtful" 根本不在云端词表里（云端发的是
++// confused / thinking），所以那张疑惑脸在语音对话中永远不会出现。
++const EmotionEntry kEmotionTable[] = {
++    {"neutral",     Emotion::Neutral, Deco::None},
++
++    {"happy",       Emotion::Happy,   Deco::None},
++    {"laughing",    Emotion::Happy,   Deco::None},
++    {"funny",       Emotion::Happy,   Deco::None},
++    {"confident",   Emotion::Happy,   Deco::None},
++    {"cool",        Emotion::Happy,   Deco::None},
++    {"relaxed",     Emotion::Happy,   Deco::None},
++    {"delicious",   Emotion::Happy,   Deco::None},
++    {"winking",     Emotion::Happy,   Deco::None},
++    {"silly",       Emotion::Happy,   Deco::None},
++    {"loving",      Emotion::Happy,   Deco::Heart},
++    {"kissy",       Emotion::Happy,   Deco::Heart},
++
++    {"angry",       Emotion::Angry,   Deco::Angry},
++
++    {"sad",         Emotion::Sad,     Deco::None},
++    {"crying",      Emotion::Sad,     Deco::Sweat},
++    {"embarrassed", Emotion::Sad,     Deco::Shy},
++
++    {"shocked",     Emotion::Doubt,   Deco::Dizzy},
++    {"surprised",   Emotion::Doubt,   Deco::None},
++    {"confused",    Emotion::Doubt,   Deco::None},
++    {"thinking",    Emotion::Doubt,   Deco::None},
++    {"doubtful",    Emotion::Doubt,   Deco::None},  // 云端不发，我们的 MCP 工具用
++
++    {"sleepy",      Emotion::Sleepy,  Deco::None},
++};
++
++// 非 neutral 的表情临时挡住待机动画，让它能停留住
++constexpr int kEmotionHoldSeconds  = 12;
++constexpr uint32_t kDecoLifetimeMs = 4000;
++
++// heart / angry / sweat 的默认位置在 y≈-70（屏幕 y≈50），实测那一带画不出来；
++// shy(y=28) 和 dizzy(y=-16) 都正常。构造后显式挪到眼睛外侧偏下的可见区域。
++constexpr int kDecoSideX = 110;
++constexpr int kDecoSideY = -10;
++
++}  // namespace
++
+ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
+ {
+     auto& stackchan = GetStackChan();
+@@ -328,28 +432,65 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
+ 
+     DisplayLockGuard lock(this);
+ 
+-    // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
+-
+     auto& avatar = stackchan.avatar();
+ 
+-    // Map emotion string to stackchan::Emotion
+-    if (strcmp(emotion, "neutral") == 0) {
+-        avatar.setEmotion(Emotion::Neutral);
+-    } else if (strcmp(emotion, "happy") == 0) {
+-        avatar.setEmotion(Emotion::Happy);
+-    } else if (strcmp(emotion, "laughing") == 0) {
+-        avatar.setEmotion(Emotion::Happy);
+-    } else if (strcmp(emotion, "angry") == 0) {
+-        avatar.setEmotion(Emotion::Angry);
+-    } else if (strcmp(emotion, "sad") == 0) {
+-        avatar.setEmotion(Emotion::Sad);
+-    } else if (strcmp(emotion, "crying") == 0) {
+-        avatar.setEmotion(Emotion::Sad);
+-    } else if (strcmp(emotion, "sleepy") == 0) {
+-        avatar.setEmotion(Emotion::Sleepy);
++    const EmotionEntry* hit = nullptr;
++    for (const auto& e : kEmotionTable) {
++        if (strcmp(emotion, e.name) == 0) {
++            hit = &e;
++            break;
++        }
++    }
++    if (hit == nullptr) {
++        ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
++    }
++
++    const Emotion face = hit ? hit->face : Emotion::Neutral;
++    const Deco deco    = hit ? hit->deco : Deco::None;
++
++    avatar.setEmotion(face);
++
++    // 上一个装饰还在就先撤掉，避免叠成一堆
++    if (emotion_decorator_id_ >= 0) {
++        avatar.removeDecorator(emotion_decorator_id_);
++        emotion_decorator_id_ = -1;
++    }
++
++    lv_obj_t* parent = lv_screen_active();
++    switch (deco) {
++        case Deco::Heart: {
++            auto d = std::make_unique<HeartDecorator>(parent, kDecoLifetimeMs);
++            d->setPosition(kDecoSideX, kDecoSideY);
++            emotion_decorator_id_ = avatar.addDecorator(std::move(d));
++            break;
++        }
++        case Deco::Angry: {
++            auto d = std::make_unique<AngryDecorator>(parent, kDecoLifetimeMs);
++            d->setPosition(kDecoSideX, kDecoSideY);
++            emotion_decorator_id_ = avatar.addDecorator(std::move(d));
++            break;
++        }
++        case Deco::Sweat: {
++            auto d = std::make_unique<SweatDecorator>(parent, kDecoLifetimeMs);
++            d->setPosition(-kDecoSideX, kDecoSideY);
++            emotion_decorator_id_ = avatar.addDecorator(std::move(d));
++            break;
++        }
++        case Deco::Shy:
++            emotion_decorator_id_ =
++                avatar.addDecorator(std::make_unique<ShyDecorator>(parent, kDecoLifetimeMs));
++            break;
++        case Deco::Dizzy:
++            emotion_decorator_id_ =
++                avatar.addDecorator(std::make_unique<DizzyDecorator>(parent, kDecoLifetimeMs));
++            break;
++        case Deco::None:
++            break;
++    }
++
++    if (face == Emotion::Sleepy) {
+         avatar.setSpeech("Zzz…");
+         is_sleeping_ = true;
+-        // avatar.mouth().setWeight(10);
+ 
+         // Stop idle motion
+         ESP_LOGW(TAG, "Stop idle motion");
+@@ -363,12 +504,12 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
+         // Return to default pose
+         auto& motion = GetStackChan().motion();
+         motion.pitchServo().moveWithSpeed(0, 80);
++    }
+ 
+-    } else if (strcmp(emotion, "doubtful") == 0) {
+-        avatar.setEmotion(Emotion::Doubt);
+-    } else {
+-        ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
+-        avatar.setEmotion(Emotion::Neutral);
++    // 非 neutral 才挡待机动画。固件在很多状态切换处都会调 SetEmotion("neutral")，
++    // 那些如果也抑制，机器人就一直僵着不动了。
++    if (face != Emotion::Neutral) {
++        SuppressIdleExpression(kEmotionHoldSeconds);
+     }
+ 
+     // Resync blink modifier base eye weights
 diff --git a/firmware/main/hal/board/stackchan_display.h b/firmware/main/hal/board/stackchan_display.h
-index f16f1f3..8238636 100644
+index f16f1f3..63412e4 100644
 --- a/firmware/main/hal/board/stackchan_display.h
 +++ b/firmware/main/hal/board/stackchan_display.h
-@@ -23,6 +23,7 @@ private:
+@@ -23,6 +23,8 @@ private:
  
      lv_obj_t* preview_image_                         = nullptr;
      esp_timer_handle_t preview_timer_                = nullptr;
 +    esp_timer_handle_t idle_expr_resume_timer_       = nullptr;
++    int emotion_decorator_id_                        = -1;
      std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
  
      void CreateIdleMotionModifier();
-@@ -38,6 +39,14 @@ public:
+@@ -38,6 +40,14 @@ public:
  
      void InitializeLcdThemes();
  
@@ -156,10 +332,10 @@ index b8d3c80..ef3e033 100644
      void setXiaozhiConfig(XiaozhiConfig_t config);
  
 diff --git a/firmware/main/hal/hal_mcp.cpp b/firmware/main/hal/hal_mcp.cpp
-index 0d73851..e1a2fc7 100644
+index 0d73851..4a1d8d3 100644
 --- a/firmware/main/hal/hal_mcp.cpp
 +++ b/firmware/main/hal/hal_mcp.cpp
-@@ -8,11 +8,49 @@
+@@ -8,11 +8,186 @@
  #include <mcp_server.h>
  #include <stackchan/stackchan.h>
  #include <apps/common/common.h>
@@ -167,12 +343,149 @@ index 0d73851..e1a2fc7 100644
 +#include <display.h>
 +#include <hal/board/stackchan_display.h>
 +#include <esp_timer.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++#include <atomic>
++#include <memory>
++#include <stdexcept>
  
  using namespace stackchan;
  
  static const std::string_view _tag = "HAL-MCP";
  
 +namespace {
++
++// -- 设备端动作序列 ------------------------------------------------
++//
++// 为什么放在设备上跑：PC 侧逐条发 set_head_angles 做不出快节奏动作。
++// 设备开了 WiFi 省电，密集请求时延迟会累积恶化——实测「点头 3 下、间隔
++// 0.25 秒」预期 1.5 秒，实际 9 秒且逐次变慢。动作在本地跑就没这个问题。
++//
++// 工具回调跑在主线程（app.Schedule），不能在里面阻塞几秒，否则音频和
++// 协议都会卡。所以起一个任务执行，工具立即返回。
++
++enum class MotionKind { Nod, Shake, LookAround };
++
++struct MotionJob {
++    MotionKind kind;
++    int times;
++    int amplitude;  // 度
++    int speed;
++};
++
++std::atomic<bool> g_motion_busy{false};
++
++// head_pet.h 里用的自然活动范围，单位 0.1 度
++constexpr int kPitchRawMin = 0;
++constexpr int kPitchRawMax = 540;
++constexpr int kYawRawMin   = -512;
++constexpr int kYawRawMax   = 512;
++
++int clamp_i(int v, int lo, int hi)
++{
++    return v < lo ? lo : (v > hi ? hi : v);
++}
++
++// 下发目标并等舵机走到目标附近。
++//
++// 注意不能等 motion.isMoving() 变 false：底层是弹簧动画（smooth_ui_toolkit
++// spring），渐近收敛、尾巴很长，等它彻底静止每段要 1 秒以上，3 下点头会拖到
++// 10 秒。点头要的是「到了极点就反向」，所以按位置容差判断，走到附近就继续。
++void move_and_settle(int yaw_raw, int pitch_raw, int speed, int timeout_ms, int tol_raw)
++{
++    yaw_raw   = clamp_i(yaw_raw, kYawRawMin, kYawRawMax);
++    pitch_raw = clamp_i(pitch_raw, kPitchRawMin, kPitchRawMax);
++
++    {
++        LvglLockGuard lock;
++        GetStackChan().motion().moveWithSpeed(yaw_raw, pitch_raw, speed);
++    }
++
++    int waited = 0;
++    while (waited < timeout_ms) {
++        vTaskDelay(pdMS_TO_TICKS(15));
++        waited += 15;
++
++        int cy, cp;
++        {
++            LvglLockGuard lock;
++            auto& motion = GetStackChan().motion();
++            cy           = motion.yawServo().getCurrentAngle();
++            cp           = motion.pitchServo().getCurrentAngle();
++        }
++        if (abs(cy - yaw_raw) <= tol_raw && abs(cp - pitch_raw) <= tol_raw) {
++            return;
++        }
++    }
++}
++
++void motion_task(void* arg)
++{
++    std::unique_ptr<MotionJob> job(static_cast<MotionJob*>(arg));
++
++    int yaw0, pitch0;
++    {
++        LvglLockGuard lock;
++        auto& motion = GetStackChan().motion();
++        yaw0         = motion.yawServo().getCurrentAngle();
++        pitch0       = motion.pitchServo().getCurrentAngle();
++    }
++
++    const int amp = job->amplitude * 10;  // 度 -> 0.1 度
++    const int spd = job->speed;
++    // 容差取幅度的 1/4，够接近极点就反向，不等弹簧收尾
++    const int tol   = amp / 4 > 15 ? amp / 4 : 15;
++    const int64_t t0 = esp_timer_get_time();
++
++    switch (job->kind) {
++        case MotionKind::Nod:
++            for (int i = 0; i < job->times; i++) {
++                move_and_settle(yaw0, pitch0 - amp, spd, 700, tol);
++                move_and_settle(yaw0, pitch0 + amp, spd, 700, tol);
++            }
++            move_and_settle(yaw0, pitch0, spd, 700, tol);
++            break;
++
++        case MotionKind::Shake:
++            for (int i = 0; i < job->times; i++) {
++                move_and_settle(yaw0 - amp, pitch0, spd, 700, tol);
++                move_and_settle(yaw0 + amp, pitch0, spd, 700, tol);
++            }
++            move_and_settle(yaw0, pitch0, spd, 700, tol);
++            break;
++
++        case MotionKind::LookAround:
++            for (int i = 0; i < job->times; i++) {
++                move_and_settle(yaw0 - amp, pitch0, spd, 1200, tol);
++                vTaskDelay(pdMS_TO_TICKS(600));
++                move_and_settle(yaw0 + amp, pitch0, spd, 1200, tol);
++                vTaskDelay(pdMS_TO_TICKS(600));
++            }
++            move_and_settle(yaw0, pitch0, spd, 1200, tol);
++            break;
++    }
++
++    mclog::tagInfo(_tag, "motion done in {} ms", (int)((esp_timer_get_time() - t0) / 1000));
++
++    g_motion_busy.store(false);
++    vTaskDelete(nullptr);
++}
++
++// 返回 true 表示已排上，false 表示上一个动作还没做完
++bool start_motion(MotionKind kind, int times, int amplitude, int speed)
++{
++    bool expected = false;
++    if (!g_motion_busy.compare_exchange_strong(expected, true)) {
++        return false;
++    }
++    auto* job = new MotionJob{kind, times, amplitude, speed};
++    if (xTaskCreatePinnedToCore(motion_task, "sc_motion", 4096, job, 4, nullptr, 1) != pdPASS) {
++        delete job;
++        g_motion_busy.store(false);
++        return false;
++    }
++    return true;
++}
 +
 +// show_text 的气泡不会自己消失，这里用一个一次性定时器到点清空。
 +// 小智助手说话时的气泡是它自己管理的，不受影响。
@@ -209,7 +522,7 @@ index 0d73851..e1a2fc7 100644
  void Hal::xiaozhi_mcp_init()
  {
      mclog::tagInfo(_tag, "init");
-@@ -146,4 +184,66 @@ void Hal::xiaozhi_mcp_init()
+@@ -146,4 +321,122 @@ void Hal::xiaozhi_mcp_init()
                             tools::stop_reminder(id);
                             return true;
                         });
@@ -273,6 +586,62 @@ index 0d73851..e1a2fc7 100644
 +
 +                           schedule_speech_clear(text.empty() ? 0 : duration);
 +
++                           return true;
++                       });
++
++    mclog::tagInfo(_tag, "add robot.nod tool");
++    mcp_server.AddTool("self.robot.nod",
++                       "Nod the head up and down. Runs on the device so the rhythm stays smooth; "
++                       "returns immediately while the motion plays out. "
++                       "Nods around the current head position and returns to it when done.",
++                       PropertyList({Property("times", kPropertyTypeInteger, 3, 1, 20),
++                                     Property("amplitude", kPropertyTypeInteger, 12, 2, 30),
++                                     Property("speed", kPropertyTypeInteger, 800, 100, 1000)}),
++                       [this](const PropertyList& properties) -> ReturnValue {
++                           int times = properties["times"].value<int>();
++                           int amp   = properties["amplitude"].value<int>();
++                           int speed = properties["speed"].value<int>();
++                           mclog::tagInfo(_tag, "nod x{} amp={} speed={}", times, amp, speed);
++                           if (!start_motion(MotionKind::Nod, times, amp, speed)) {
++                               throw std::runtime_error("Another motion is still running");
++                           }
++                           return true;
++                       });
++
++    mclog::tagInfo(_tag, "add robot.shake_head tool");
++    mcp_server.AddTool("self.robot.shake_head",
++                       "Shake the head left and right, the gesture for saying no. Runs on the device; "
++                       "returns immediately while the motion plays out. "
++                       "Shakes around the current head position and returns to it when done.",
++                       PropertyList({Property("times", kPropertyTypeInteger, 3, 1, 20),
++                                     Property("amplitude", kPropertyTypeInteger, 25, 5, 45),
++                                     Property("speed", kPropertyTypeInteger, 800, 100, 1000)}),
++                       [this](const PropertyList& properties) -> ReturnValue {
++                           int times = properties["times"].value<int>();
++                           int amp   = properties["amplitude"].value<int>();
++                           int speed = properties["speed"].value<int>();
++                           mclog::tagInfo(_tag, "shake_head x{} amp={} speed={}", times, amp, speed);
++                           if (!start_motion(MotionKind::Shake, times, amp, speed)) {
++                               throw std::runtime_error("Another motion is still running");
++                           }
++                           return true;
++                       });
++
++    mclog::tagInfo(_tag, "add robot.look_around tool");
++    mcp_server.AddTool("self.robot.look_around",
++                       "Slowly look left and right with a pause on each side, like scanning the room. "
++                       "Slower and wider than shake_head. Runs on the device, returns immediately.",
++                       PropertyList({Property("times", kPropertyTypeInteger, 1, 1, 10),
++                                     Property("amplitude", kPropertyTypeInteger, 40, 10, 50),
++                                     Property("speed", kPropertyTypeInteger, 300, 100, 1000)}),
++                       [this](const PropertyList& properties) -> ReturnValue {
++                           int times = properties["times"].value<int>();
++                           int amp   = properties["amplitude"].value<int>();
++                           int speed = properties["speed"].value<int>();
++                           mclog::tagInfo(_tag, "look_around x{} amp={} speed={}", times, amp, speed);
++                           if (!start_motion(MotionKind::LookAround, times, amp, speed)) {
++                               throw std::runtime_error("Another motion is still running");
++                           }
 +                           return true;
 +                       });
  }

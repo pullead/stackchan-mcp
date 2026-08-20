@@ -179,6 +179,47 @@ ESP32-S3 原生 USB-Serial/JTAG 配 stub flasher 做大块读取会报 `Packet c
 
 横向差 12 倍。残留的纵向漂移是眨眼造成的，符合预期。
 
+### 9. 弹簧动画不能拿来当动作节奏的判据
+
+给点头/摇头做设备端动作时，最初用 `motion.isMoving()` 轮询「等舵机到位再反向」。
+结果 3 下点头要 10 秒。
+
+原因：`Servo::isMoving()` 是 `_angle_anim.done() == false || is_moving_impl()`，
+而 `_angle_anim` 是 **smooth_ui_toolkit 的弹簧动画**，渐近收敛、尾巴很长。等它彻底
+静止每段要 1 秒以上，7 段（3 下点头 + 回位）刚好凑满 7×1200ms 超时。
+
+**解法**：改成按**位置容差**判断，走到目标附近（容差取幅度的 1/4）就继续下一段，
+不等弹簧收尾。改完 3 下点头 2622 ms，实测数据由设备自己打日志给出。
+
+顺带一提，动作**必须放在设备端跑**。PC 侧逐条发 `set_head_angles` 做不出快节奏：
+设备开了 WiFi 省电，密集请求延迟会累积恶化，实测同样 3 下点头要 9 秒且逐次变慢
+（1.19s → 3.42s → 7.97s）。
+
+### 10. 装饰器创建后不显示，要显式 setPosition 一下
+
+给表情配 heart / angry / sweat / shy / dizzy 五个装饰器时，shy 和 dizzy 正常显示，
+heart / angry / sweat 完全画不出来（像素统计确认不是看漏）。
+
+三个失败的默认位置 y 都在 -70 附近，成功的是 -16 和 28，一度以为是那块区域被裁掉。
+但改完位置后发现 sweat 的动画每 700ms 会把 x 重置回默认值，它照样显示了——**说明
+原位置本身没问题**。
+
+真正起作用的是构造后多调了一次 `setPosition()`，推测是它触发了 LVGL 的重绘失效标记，
+否则对象虽然创建了但所在区域没被标记重绘。**这个机制未经证实**，只是比原假设更符合观察。
+做法是先构造、`setPosition()`、再 `addDecorator()`。
+
+### 11. screen.snapshot 的颜色不可信（RGB565 字节序）
+
+设备端 `SnapshotToJpeg` 读帧缓冲时字节序反了，截图里的颜色全是错的。
+实测爱心源码写死 `0xE13232`（红），实机显示红色，截图里是绿色。
+
+验算对得上：`0xE13232` → RGB565 `0xE186` → 字节交换 `0x86E1` → 解回 RGB 是 (128,220,8)，
+绿色。**形状、位置、有无都是准的，只有颜色不能信。**
+
+不要试图在 PC 侧反变换——那是位级操作，撑不过 JPEG 有损压缩（实测还原不出红色）。
+要修得改 `xiaozhi-esp32/main/display/lvgl_display/lvgl_display.cc`，但这只影响验证工具，
+没修。
+
 ## 五、验证结果
 
 ```
@@ -258,6 +299,8 @@ COM 口默认 `COM6`，用 `$env:STACKCHAN_PORT_COM` 覆盖。
 - `laughing` 和 `happy` 在固件里映射到同一张脸，`crying` 和 `sad` 同理。实际只有 6 张不同的脸：neutral / happy / angry / sad / sleepy / doubtful
 - `set_emotion` 的 `hold_seconds` 到期后表情会回归待机动画，这是刻意设计；需要长期保持就传大一点的值（上限 300 秒）
 - ESP32 开了 WiFi 省电（`wifi:pm start, type: 1`），首次请求偶发超时，ping 延迟能涨到 2 秒 —— 桥接里的重试是必要的
+- 固件新增工具后**必须重启 Claude Code**，MCP 工具列表是会话启动时加载的
+- `screen.snapshot` 无论成败都返回 `true`，只能靠串口日志确认是否真的上传了
 
 **可以做的**
 

@@ -52,13 +52,17 @@ M5Stack 的官方固件本身就是 [78/xiaozhi-esp32](https://github.com/78/xia
 | `.mcp.json` | Claude Code 的 MCP 注册 |
 | `backup/RESTORE.md` | 出厂固件备份与还原说明 |
 | `DEVLOG.md` | 开发日志、设计决策、全部踩坑记录 |
+| `CLAUDE.md` | 给 Claude Code 的项目约定：表情联动、气泡摘要、不要碰的东西 |
 
 ## 可用工具（20 个）
 
-设备自带 18 个 + 本项目新增 2 个：
+设备自带 18 个 + 本项目新增 5 个（共 23 个）：
 
-- **新增**：`self.robot.set_emotion`（8 个取值，`hold_seconds` 默认 15 秒防止被待机动画覆盖）、
-  `self.robot.show_text`（`duration_seconds` 默认 8 秒后自动清空）
+- **新增**：`self.robot.set_emotion`（认全部 21 个小智情绪词，自动配爱心/怒气/汗滴/脸红/晕眩
+  装饰器，`hold_seconds` 默认 15 秒防止被待机动画覆盖）、`self.robot.show_text`
+  （`duration_seconds` 默认 8 秒后自动清空，长文本自动横向滚动）
+- **新增动作**：`self.robot.nod` / `shake_head` / `look_around`，动作在设备本地跑完，
+  立即返回（点头 3 下 2.6 秒；PC 侧循环发指令要 9 秒）
 - 头部：`set_head_angles` / `get_head_angles`
 - 灯光：`set_led_color`
 - 相机：`take_photo`
