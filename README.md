@@ -40,6 +40,18 @@ M5Stack 的官方固件本身就是 [78/xiaozhi-esp32](https://github.com/78/xia
 
 然后把 `.mcp.json` 里的 `STACKCHAN_HOST` 改成设备实际 IP，重启 Claude Code 即可。
 
+## sc: 前缀
+
+把 MCP 服务提升到全局作用域后，可以在**任意项目**的对话框里指挥机器人：
+
+```
+sc: 转头看左边
+sc: 点三下头
+sc: 拍张照看看前面是什么
+```
+
+`sc:` 后面是自然语言，不是固定命令。配置方法见 [docs/global-setup.md](docs/global-setup.md)。
+
 从零开始搭环境请看 **[DEVLOG.md](DEVLOG.md)**，里面有完整的踩坑记录。
 
 ## 目录
@@ -52,9 +64,10 @@ M5Stack 的官方固件本身就是 [78/xiaozhi-esp32](https://github.com/78/xia
 | `.mcp.json` | Claude Code 的 MCP 注册 |
 | `backup/RESTORE.md` | 出厂固件备份与还原说明 |
 | `DEVLOG.md` | 开发日志、设计决策、全部踩坑记录 |
+| `docs/global-setup.md` | 让 `sc:` 前缀在任意项目可用的全局配置（仓库外内容的备份） |
 | `CLAUDE.md` | 给 Claude Code 的项目约定：表情联动、气泡摘要、不要碰的东西 |
 
-## 可用工具（20 个）
+## 可用工具（23 个）
 
 设备自带 18 个 + 本项目新增 5 个（共 23 个）：
 
